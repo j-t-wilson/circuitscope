@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "circuitscope"
+version = "0.1.0"
+description = "Educational tool for understanding detector errors in QEC circuits"
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [
+    {name = "Jack Wilson"}
+]
+keywords = ["quantum", "error correction", "stim", "visualization", "QEC"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "stim",
+    "flask",
+]
+
+[project.scripts]
+circuitscope = "circuitscope.server:main"
+
+[project.urls]
+"Homepage" = "https://github.com/j-t-wilson/circuitscope"
+"Bug Tracker" = "https://github.com/j-t-wilson/circuitscope/issues"
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["circuitscope*"]
+
+[tool.setuptools.package-data]
+circuitscope = ["static/**/*"]
