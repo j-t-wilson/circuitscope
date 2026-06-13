@@ -1,9 +1,14 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useTheme } from '../../contexts/ThemeContext.jsx';
+import { formatZ } from '../../utils/measuredData.js';
+import ExportMenu from '../ExportMenu.jsx';
 
-export default function ErrorDetails({ detector, errors, detailedBudget }) {
+export default function ErrorDetails({ detector, errors, detailedBudget, liveFraction, modelModified, setHoveredMechanism, comparisonStats, mcStats }) {
   const { C } = useTheme();
   const [expandedGroups, setExpandedGroups] = useState({});
+
+  // Don't leave a stale mechanism filter behind when this panel goes away
+  useEffect(() => () => setHoveredMechanism?.(null), [setHoveredMechanism]);
 
   const budgetEntries = useMemo(() => {
     if (detailedBudget?.breakdown) {
@@ -43,13 +48,12 @@ export default function ErrorDetails({ detector, errors, detailedBudget }) {
     };
 
     budgetEntries.forEach(entry => {
-      const depol2Match = entry.key?.match(/^(DEPOLARIZE2(?:\s+q\d+,q\d+)?):(.+)$/);
-      const depol1Match = entry.key?.match(/^(DEPOLARIZE1):(.+)$/);
+      // Group depolarizing channels (e.g. "DEPOLARIZE2 q0,q1:X0*X1") by channel,
+      // collapsing their individual Pauli components into expandable sub-entries
+      const depolMatch = entry.key?.match(/^(DEPOLARIZE1|DEPOLARIZE2(?:\s+q\d+,q\d+)?):(.+)$/);
 
-      if (depol2Match || depol1Match) {
-        const match = depol2Match || depol1Match;
-        const groupKey = match[1];
-        const pauliPart = match[2];
+      if (depolMatch) {
+        const [, groupKey, pauliPart] = depolMatch;
 
         if (!groups[groupKey]) {
           groups[groupKey] = {
@@ -94,29 +98,71 @@ export default function ErrorDetails({ detector, errors, detailedBudget }) {
     setExpandedGroups(prev => ({ ...prev, [key]: !prev[key] }));
   };
 
+  // The flat per-(gate, Pauli) entries are the real table behind the grouped
+  // display, so export those rather than the depolarizing-group rollups.
+  const getBudgetTable = () => ({
+    columns: [
+      { key: 'mechanism', label: 'mechanism' },
+      { key: 'gate', label: 'gate' },
+      { key: 'pauli', label: 'pauli' },
+      { key: 'count', label: 'count' },
+      { key: 'share_of_log_weight', label: 'share_of_log_weight' },
+      { key: 'p_if_alone', label: 'p_if_alone' },
+      { key: 'sum_p', label: 'sum_p' },
+    ],
+    rows: budgetEntries.map(e => ({
+      mechanism: e.key,
+      gate: e.gateName,
+      pauli: e.pauli || null,
+      count: e.count,
+      share_of_log_weight: e.share_of_log_weight,
+      p_if_alone: e.p_if_only_this_group,
+      sum_p: e.sum_p,
+    })),
+  });
+
   const eventFraction = detailedBudget?.event_fraction;
   const eventPercent = eventFraction != null ? (eventFraction * 100).toFixed(3) : null;
+  // With parameter overrides active, the headline shows the live fraction
+  // (matching the detector cards) with the nominal value struck through —
+  // same pattern as the Analysis view.
+  const livePercent = modelModified && liveFraction != null ? (liveFraction * 100).toFixed(3) : null;
+  const showLive = livePercent != null && livePercent !== eventPercent;
 
-  const depolColors = [C.gate, C.accent, C.observable];
-  const otherColors = [C.error, C.detector, C.measure, C.success, C.warning];
-
-  const colorState = useMemo(() => {
+  const colorMap = useMemo(() => {
+    const depolColors = [C.gate, C.accent, C.observable];
+    const otherColors = [C.error, C.detector, C.measure, C.success, C.warning];
     let depolIdx = 0;
     let otherIdx = 0;
-    const colorMap = {};
+    const map = {};
     groupedBudgetEntries.forEach(entry => {
       if (entry.gateName?.includes('DEPOLARIZE')) {
-        colorMap[entry.key] = depolColors[depolIdx % depolColors.length];
-        depolIdx++;
+        map[entry.key] = depolColors[depolIdx++ % depolColors.length];
       } else {
-        colorMap[entry.key] = otherColors[otherIdx % otherColors.length];
-        otherIdx++;
+        map[entry.key] = otherColors[otherIdx++ % otherColors.length];
       }
     });
-    return colorMap;
-  }, [groupedBudgetEntries, depolColors, otherColors]);
+    return map;
+  }, [groupedBudgetEntries, C]);
 
-  const getColor = (key) => colorState[key] || C.textDim;
+  const getColor = (key) => colorMap[key] || C.textDim;
+
+  // Derive a {name, qubits} filter for timeline highlighting. Qubits come from
+  // the group key ("DEPOLARIZE2 q0,q1") or the Pauli term ("X_ERROR:X11"), so
+  // hovering a card only lights up that mechanism's locations, not every
+  // instance of the same gate elsewhere in the circuit.
+  const mechanismFilter = (entry) => {
+    const pairMatch = entry.key?.match(/\sq(\d+),q(\d+)$/);
+    if (pairMatch) {
+      return { name: entry.gateName, qubits: [Number(pairMatch[1]), Number(pairMatch[2])] };
+    }
+    if (!entry.isGroup) {
+      const pauliPart = entry.key?.split(':')[1];
+      const qubits = pauliPart ? [...pauliPart.matchAll(/[XYZ](\d+)/g)].map(m => Number(m[1])) : [];
+      if (qubits.length) return { name: entry.gateName, qubits };
+    }
+    return { name: entry.gateName, qubits: null };
+  };
 
   const mechanismCard = (entry, children) => {
     const color = getColor(entry.key);
@@ -126,6 +172,8 @@ export default function ErrorDetails({ detector, errors, detailedBudget }) {
     return (
       <div
         key={entry.key}
+        onMouseEnter={() => setHoveredMechanism?.(mechanismFilter(entry))}
+        onMouseLeave={() => setHoveredMechanism?.(null)}
         style={{
           padding: 12,
           background: `linear-gradient(180deg, ${C.glassStrong}, ${C.field})`,
@@ -169,20 +217,91 @@ export default function ErrorDetails({ detector, errors, detailedBudget }) {
         <div>
           <h2 style={{ margin: 0, fontSize: 18, color: C.detectorBright, fontWeight: 800, fontFamily: 'var(--mono)' }}>{detector}</h2>
           <p style={{ margin: '3px 0 0', fontSize: 11, color: C.textDim }}>
-            Event fraction from analytical budget
+            {showLive ? 'Event fraction under modified parameters' : 'Event fraction from analytical budget'}
           </p>
         </div>
-        {eventPercent != null && (
+        {showLive ? (
+          <span style={{ whiteSpace: 'nowrap' }}>
+            <span style={{ color: C.textDim, fontFamily: 'var(--mono)', fontSize: 13, textDecoration: 'line-through' }}>
+              {eventPercent}%
+            </span>
+            <span style={{ marginLeft: 7, fontSize: 21, fontWeight: 800, color: C.warning, fontFamily: 'var(--mono)' }}>
+              {livePercent}%
+            </span>
+          </span>
+        ) : eventPercent != null && (
           <span style={{ fontSize: 21, fontWeight: 800, color: C.error, fontFamily: 'var(--mono)' }}>
             {eventPercent}%
           </span>
         )}
       </div>
 
+      {comparisonStats && (
+        <div style={{
+          marginTop: 10,
+          padding: '9px 11px',
+          background: C.field,
+          border: `1px solid ${C.line}`,
+          borderRadius: 8,
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'baseline',
+          gap: 10,
+          flexWrap: 'wrap',
+          fontSize: 12,
+          fontFamily: 'var(--mono)',
+        }}>
+          <span style={{ color: C.textDim }}>
+            Measured <span style={{ color: C.measure, fontWeight: 800 }}>{(comparisonStats.measured * 100).toFixed(3)}%</span>
+          </span>
+          <span style={{ color: C.textDim }}>
+            Δ <span style={{ color: comparisonStats.delta >= 0 ? C.error : C.accent, fontWeight: 800 }}>
+              {comparisonStats.delta >= 0 ? '+' : ''}{(comparisonStats.delta * 100).toFixed(3)}%
+            </span>
+            {comparisonStats.z != null && (
+              <span style={{ marginLeft: 6, color: C.text }}>{formatZ(comparisonStats.z)}</span>
+            )}
+          </span>
+        </div>
+      )}
+
+      {mcStats && (
+        <div style={{
+          marginTop: 10,
+          padding: '9px 11px',
+          background: C.field,
+          border: `1px solid ${C.line}`,
+          borderRadius: 8,
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'baseline',
+          gap: 10,
+          flexWrap: 'wrap',
+          fontSize: 12,
+          fontFamily: 'var(--mono)',
+        }}>
+          <span style={{ color: C.textDim }}>
+            {/* 4σ: same agreement bound as the Monte Carlo validation tests */}
+            Sampled <span style={{ color: Math.abs(mcStats.z) <= 4 ? C.success : C.error, fontWeight: 800 }}>{(mcStats.measured * 100).toFixed(3)}%</span>
+            {' '}±{(mcStats.sigma * 100).toFixed(3)}
+          </span>
+          <span style={{ color: C.text }}>{formatZ(mcStats.z)}</span>
+        </div>
+      )}
+
       <div style={{ margin: '16px 0' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', color: C.textDim, fontSize: 11, marginBottom: 8 }}>
-          <span>Contribution breakdown</span>
-          <span>{groupedBudgetEntries.length} mechanism{groupedBudgetEntries.length !== 1 ? 's' : ''}</span>
+          {/* Budget shares come from the backend analysis, so they always
+              describe the nominal rates, not the slider overrides */}
+          <span>Contribution breakdown{modelModified ? ' (nominal rates)' : ''}</span>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span>{groupedBudgetEntries.length} mechanism{groupedBudgetEntries.length !== 1 ? 's' : ''}</span>
+            <ExportMenu
+              baseName={`circuitscope-budget-${detector}`}
+              getTable={getBudgetTable}
+              title={`Export ${detector}'s error budget breakdown as CSV or JSON (nominal rates)`}
+            />
+          </span>
         </div>
         <div style={{
           height: 30,

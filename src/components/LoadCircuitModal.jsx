@@ -1,22 +1,65 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useRef } from 'react';
 import { useTheme } from '../contexts/ThemeContext.jsx';
 import { validateCircuit } from '../utils/validateCircuit.js';
 import Logo from './Logo.jsx';
 
+// Launch screen: shown full-screen when no circuit is loaded, or as a
+// dismissable overlay (logo click) over an intact workspace — pass onCancel
+// for the latter. Once a circuit is analyzed, all editing happens in place in
+// the Code view.
 export default function LoadCircuitModal({
-  onClose,
   onLoad,
+  onCancel = null,
   isLoading,
   error,
-  isLaunchMode = false,
-  defaultCircuit = '',
-  currentCircuit = '',
-  examples = [],
-  defaultExampleId = null
+  initialCircuit = '',
+  examples = []
 }) {
   const { C } = useTheme();
-  const [selectedExampleId, setSelectedExampleId] = useState(isLaunchMode ? '' : defaultExampleId);
-  const [circuitText, setCircuitText] = useState(isLaunchMode ? '' : currentCircuit);
+  const [selectedExampleId, setSelectedExampleId] = useState('');
+  // Prefill with the last analyzed circuit (if any) so a returning visit
+  // picks up where the previous session left off
+  const [circuitText, setCircuitText] = useState(initialCircuit);
+  const [isDragging, setIsDragging] = useState(false);
+  const fileInputRef = useRef(null);
+  // Drag enter/leave fire on every child; count nesting so the highlight
+  // doesn't flicker while moving across the panel
+  const dragDepth = useRef(0);
+
+  const loadFileText = (file) => {
+    if (!file) return;
+    file.text().then(text => {
+      setCircuitText(text);
+      setSelectedExampleId('');
+    });
+  };
+
+  const handleFile = (e) => {
+    loadFileText(e.target.files?.[0]);
+    e.target.value = '';
+  };
+
+  const handleDragEnter = (e) => {
+    e.preventDefault();
+    dragDepth.current += 1;
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e) => {
+    e.preventDefault();
+    dragDepth.current -= 1;
+    if (dragDepth.current <= 0) {
+      dragDepth.current = 0;
+      setIsDragging(false);
+    }
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    dragDepth.current = 0;
+    setIsDragging(false);
+    loadFileText(e.dataTransfer.files?.[0]);
+  };
 
   const handleExampleChange = (e) => {
     const exampleId = e.target.value;
@@ -55,19 +98,22 @@ export default function LoadCircuitModal({
       style={{
         position: 'fixed',
         inset: 0,
-        background: isLaunchMode
-          ? 'transparent'
-          : 'rgba(4, 7, 10, 0.74)',
+        background: onCancel ? 'rgba(4, 7, 10, 0.74)' : 'transparent',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
         zIndex: 1000,
         padding: 20,
       }}
-      onClick={isLaunchMode ? undefined : onClose}
+      onClick={onCancel || undefined}
+      onDragEnter={handleDragEnter}
+      onDragOver={e => e.preventDefault()}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
     >
       <div
         className="glass-panel"
+        onClick={e => e.stopPropagation()}
         style={{
           borderRadius: 10,
           padding: 0,
@@ -76,9 +122,9 @@ export default function LoadCircuitModal({
           display: 'flex',
           flexDirection: 'column',
           overflow: 'hidden',
-          borderColor: C.lineStrong,
+          borderColor: isDragging ? C.accent : C.lineStrong,
+          boxShadow: isDragging ? `0 0 0 2px ${C.accentSoft}` : undefined,
         }}
-        onClick={e => e.stopPropagation()}
       >
         <div
           className="instrument-strip"
@@ -87,47 +133,26 @@ export default function LoadCircuitModal({
             justifyContent: 'space-between',
             alignItems: 'center',
             gap: 16,
-            padding: isLaunchMode ? '18px 20px' : '14px 18px',
+            padding: '18px 20px',
             flexShrink: 0,
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 13, minWidth: 0 }}>
-            <Logo size={isLaunchMode ? 50 : 36} />
+            <Logo size={50} />
             <div style={{ minWidth: 0 }}>
-              <div className="display-title" style={{ fontSize: isLaunchMode ? 31 : 23, color: C.text, lineHeight: 1.02 }}>
-                {isLaunchMode ? 'CircuitScope' : 'Edit circuit'}
+              <div className="display-title" style={{ fontSize: 31, color: C.text, lineHeight: 1.02 }}>
+                CircuitScope
               </div>
               <div style={{ color: C.textDim, fontSize: 12, marginTop: 5 }}>
-                {isLaunchMode
-                  ? 'Load a Stim circuit to inspect detector event fractions.'
-                  : 'Modify the Stim source and re-run analysis.'}
+                Load a Stim circuit to inspect detector event fractions.
               </div>
             </div>
           </div>
-          {!isLaunchMode && (
-            <button
-              onClick={onClose}
-              aria-label="Close"
-              style={{
-                width: 34,
-                height: 34,
-                background: C.field,
-                border: `1px solid ${C.line}`,
-                borderRadius: 8,
-                color: C.textDim,
-                cursor: 'pointer',
-                fontSize: 22,
-                lineHeight: 1,
-              }}
-            >
-              &times;
-            </button>
-          )}
         </div>
 
         <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', minHeight: 0, flex: 1 }}>
           <div className="soft-scroll" style={{ padding: 18, overflow: 'auto', minHeight: 0 }}>
-            {isLaunchMode && examples.length > 0 && (
+            {examples.length > 0 && (
               <div style={{ marginBottom: 14 }}>
                 <label style={{ display: 'block', color: C.textDim, fontSize: 12, marginBottom: 7 }}>
                   Example circuit
@@ -157,9 +182,36 @@ export default function LoadCircuitModal({
               </div>
             )}
 
-            <label style={{ display: 'block', color: C.textDim, fontSize: 12, marginBottom: 7 }}>
-              Stim circuit
-            </label>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 10, marginBottom: 7 }}>
+              <label style={{ color: C.textDim, fontSize: 12 }}>
+                Stim circuit
+              </label>
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                title="Load a .stim file (or drag one onto this window)"
+                style={{
+                  padding: '4px 10px',
+                  background: C.field,
+                  color: C.textDim,
+                  border: `1px solid ${C.line}`,
+                  borderRadius: 7,
+                  cursor: 'pointer',
+                  fontSize: 11,
+                  fontWeight: 650,
+                  fontFamily: 'var(--display)',
+                }}
+              >
+                Load file…
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".stim,.txt"
+                onChange={handleFile}
+                style={{ display: 'none' }}
+              />
+            </div>
             <textarea
               value={circuitText}
               onChange={e => setCircuitText(e.target.value)}
@@ -171,12 +223,12 @@ M 0 1 2
 DETECTOR rec[-1] rec[-2]`}
               style={{
                 ...inputBase,
-                minHeight: isLaunchMode ? 330 : 300,
-                border: `1px solid ${hasWarnings ? C.warning : (error ? C.error : C.lineStrong)}`,
+                minHeight: 330,
+                border: `1px solid ${isDragging ? C.accent : hasWarnings ? C.warning : (error ? C.error : C.lineStrong)}`,
                 padding: 13,
                 resize: 'vertical',
                 lineHeight: 1.55,
-                boxShadow: hasWarnings ? `0 0 0 1px ${C.amberSoft}` : 'none',
+                boxShadow: hasWarnings && !isDragging ? `0 0 0 1px ${C.amberSoft}` : 'none',
               }}
               disabled={isLoading}
             />
@@ -242,10 +294,10 @@ DETECTOR rec[-1] rec[-2]`}
               Tip: Place TICK commands between sequential operations and keep DETECTORs close to their measurements.
             </p>
             <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
-              {!isLaunchMode && (
+              {onCancel && (
                 <button
                   type="button"
-                  onClick={onClose}
+                  onClick={onCancel}
                   style={{
                     padding: '9px 15px',
                     background: C.field,

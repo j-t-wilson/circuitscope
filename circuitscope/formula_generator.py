@@ -16,6 +16,7 @@ where p_effective depends on the error type:
 from __future__ import annotations
 
 import math
+from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -143,21 +144,16 @@ def _extract_errors_for_detector(
 
     errors: List[Tuple[str, float]] = []
     # Track unique gate locations for DEPOLARIZE errors (for display count)
-    seen_gate_locations: Dict[Tuple[str, float, int, tuple], bool] = {}
+    seen_gate_locations = set()
 
     for ee in explained:
-        # Check if this error affects our detector
-        affects_detector = False
-        for term in ee.dem_error_terms:
-            dt = term.dem_target
-            if dt.is_relative_detector_id() and int(dt.val) == detector_id:
-                affects_detector = True
-                break
-
+        affects_detector = any(
+            term.dem_target.is_relative_detector_id() and int(term.dem_target.val) == detector_id
+            for term in ee.dem_error_terms
+        )
         if not affects_detector:
             continue
 
-        # Extract each circuit error location
         for loc in ee.circuit_error_locations:
             parameter = _parameter_from_location(loc)
             if parameter is None:
@@ -165,30 +161,19 @@ def _extract_errors_for_detector(
 
             gate_type, original_prob = parameter
             errors.append(parameter)
-            seen_gate_locations[_location_identity(loc, gate_type, original_prob)] = True
+            seen_gate_locations.add(_location_identity(loc, gate_type, original_prob))
 
     # Count unique gate instances per (gate_type, value)
-    gate_counts: Dict[Tuple[str, float], int] = {}
-    for gate_type, value, _, _ in seen_gate_locations.keys():
-        key = (gate_type, value)
-        gate_counts[key] = gate_counts.get(key, 0) + 1
+    gate_counts = Counter((gate_type, value) for gate_type, value, _, _ in seen_gate_locations)
 
-    return errors, gate_counts
+    return errors, dict(gate_counts)
 
 
 def _group_errors(
     errors: List[Tuple[str, float]]
 ) -> Dict[Tuple[str, float], int]:
-    """
-    Group errors by (gate_type, original_value) and count occurrences.
-
-    Returns a dict mapping (gate_type, value) -> count.
-    """
-    groups: Dict[Tuple[str, float], int] = {}
-    for gate_type, value in errors:
-        key = (gate_type, value)
-        groups[key] = groups.get(key, 0) + 1
-    return groups
+    """Group errors by (gate_type, original_value), mapping each to its count."""
+    return dict(Counter(errors))
 
 
 def _compute_event_fraction(
@@ -205,6 +190,30 @@ def _compute_event_fraction(
         ps.extend([_effective_probability(gate_type, orig_value)] * count)
 
     return detector_probability_from_independent_toggles(ps)
+
+
+def _param_signature(parameters: List[ParameterInfo]) -> str:
+    """Render the generated function's parameter list with default values."""
+    return ", ".join(f"{p.name}={p.original_value}" for p in parameters)
+
+
+def _helpers_str(parameters: List[ParameterInfo]) -> str:
+    """Return the depolarization helper definitions the parameters require."""
+    helpers = []
+    if any(p.gate_type == "DEPOLARIZE1" for p in parameters):
+        helpers.append(_DEPOL1_HELPER)
+    if any(p.gate_type == "DEPOLARIZE2" for p in parameters):
+        helpers.append(_DEPOL2_HELPER)
+    return "\n".join(helpers)
+
+
+def _p_eff_expr(p: ParameterInfo) -> str:
+    """Expression for a parameter's effective toggle probability in generated code."""
+    if p.gate_type == "DEPOLARIZE1":
+        return f"_depol1_effective({p.name})"
+    if p.gate_type == "DEPOLARIZE2":
+        return f"_depol2_effective({p.name})"
+    return p.name
 
 
 def _p_eff_derivative(gate_type: str, value: float) -> float:
@@ -329,50 +338,21 @@ def generate_detector_formula(
         # Store gate count for display (unique gate instances, not sub-errors)
         param_gate_counts[name] = gate_counts.get((gate_type, value), count)
 
-    # Check which helper functions we need
-    needs_depol1 = any(p.gate_type == "DEPOLARIZE1" for p in parameters)
-    needs_depol2 = any(p.gate_type == "DEPOLARIZE2" for p in parameters)
-
-    # Build the function signature
-    param_signature = ", ".join(
-        f"{p.name}={p.original_value}" for p in parameters
-    )
-
     # Build the docstring
     param_docs = "\n    ".join(
         f"{p.name}: {p.gate_type} probability (appears {p.count}x in circuit)"
         for p in parameters
     )
 
-    # Build the contribution lines
-    contribution_lines = []
-    for p in parameters:
-        if p.gate_type == "DEPOLARIZE1":
-            contribution_lines.append(
-                f"    prod *= (1.0 - 2.0 * _depol1_effective({p.name})) ** {p.count}"
-            )
-        elif p.gate_type == "DEPOLARIZE2":
-            contribution_lines.append(
-                f"    prod *= (1.0 - 2.0 * _depol2_effective({p.name})) ** {p.count}"
-            )
-        else:
-            contribution_lines.append(
-                f"    prod *= (1.0 - 2.0 * {p.name}) ** {p.count}"
-            )
+    contributions_str = "\n".join(
+        f"    prod *= (1.0 - 2.0 * {_p_eff_expr(p)}) ** {p.count}"
+        for p in parameters
+    )
 
-    contributions_str = "\n".join(contribution_lines)
-
-    # Build helper functions section
-    helpers = []
-    if needs_depol1:
-        helpers.append(_DEPOL1_HELPER)
-    if needs_depol2:
-        helpers.append(_DEPOL2_HELPER)
-
-    helpers_str = "\n".join(helpers) if helpers else ""
+    helpers_str = _helpers_str(parameters)
 
     # Build the complete function
-    code = f"""def detector_D{detector_id}_event_fraction({param_signature}):
+    code = f"""def detector_D{detector_id}_event_fraction({_param_signature(parameters)}):
     \"\"\"
     Analytical event fraction for detector D{detector_id}.
 
@@ -447,7 +427,7 @@ def generate_average_formula(circuit: stim.Circuit) -> Dict:
     # Store: list of (grouped_errors, event_fraction) per detector
     detector_extractions: List[Tuple[Dict[Tuple[str, float], int], float]] = []
     all_params: Dict[Tuple[str, float], Dict[int, int]] = {}
-    all_gate_counts: Dict[Tuple[str, float], int] = {}  # Aggregate gate counts across detectors
+    all_gate_counts: Counter = Counter()  # Unique gate counts aggregated across detectors
     total_ef = 0.0
 
     for det_id in range(num_detectors):
@@ -457,15 +437,9 @@ def generate_average_formula(circuit: stim.Circuit) -> Dict:
         detector_extractions.append((grouped, ef))
         total_ef += ef
 
-        for (gate_type, value), count in grouped.items():
-            key = (gate_type, value)
-            if key not in all_params:
-                all_params[key] = {}
-            all_params[key][det_id] = count
-
-        # Accumulate gate counts (unique gates across all detectors)
-        for key, gc in det_gate_counts.items():
-            all_gate_counts[key] = all_gate_counts.get(key, 0) + gc
+        for key, count in grouped.items():
+            all_params.setdefault(key, {})[det_id] = count
+        all_gate_counts.update(det_gate_counts)
 
     original_avg_ef = total_ef / num_detectors
 
@@ -494,65 +468,44 @@ def generate_average_formula(circuit: stim.Circuit) -> Dict:
             count=total_count,  # Total across all detectors
         ))
 
-    # Check which helper functions we need
-    needs_depol1 = any(p.gate_type == "DEPOLARIZE1" for p in parameters)
-    needs_depol2 = any(p.gate_type == "DEPOLARIZE2" for p in parameters)
-
-    # Build the function signature
-    param_signature = ", ".join(
-        f"{p.name}={p.original_value}" for p in parameters
-    )
-
     # Build the docstring
     param_docs = "\n    ".join(
         f"{p.name}: {p.gate_type} probability (total {p.count}x across all detectors)"
         for p in parameters
     )
 
-    # Build helper functions section
-    helpers = []
-    if needs_depol1:
-        helpers.append(_DEPOL1_HELPER)
-    if needs_depol2:
-        helpers.append(_DEPOL2_HELPER)
+    helpers_str = _helpers_str(parameters)
 
-    helpers_str = "\n".join(helpers) if helpers else ""
-
-    # Build detector_data from cached extractions
-    detector_data = []
-    for grouped, _ in detector_extractions:
-        contrib_list = []
-        for (gate_type, value), count in sorted(grouped.items()):
-            param_name = _make_param_name(gate_type, value)
-            contrib_list.append((param_name, gate_type, count))
-        detector_data.append(contrib_list)
-
-    # Convert to Python literal for embedding in code
+    # Per-detector (param_name, gate_type, count) lists, embedded in the
+    # generated code as a Python literal
+    detector_data = [
+        [
+            (_make_param_name(gate_type, value), gate_type, count)
+            for (gate_type, value), count in sorted(grouped.items())
+        ]
+        for grouped, _ in detector_extractions
+    ]
     detector_data_repr = repr(detector_data)
 
-    # Build the p_eff calculation based on which error types exist
-    if needs_depol1 and needs_depol2:
-        p_eff_code = """            if gate_type == "DEPOLARIZE1":
-                p_eff = _depol1_effective(p)
-            elif gate_type == "DEPOLARIZE2":
-                p_eff = _depol2_effective(p)
-            else:
-                p_eff = p"""
-    elif needs_depol1:
-        p_eff_code = """            if gate_type == "DEPOLARIZE1":
-                p_eff = _depol1_effective(p)
-            else:
-                p_eff = p"""
-    elif needs_depol2:
-        p_eff_code = """            if gate_type == "DEPOLARIZE2":
-                p_eff = _depol2_effective(p)
-            else:
-                p_eff = p"""
+    # Build the p_eff dispatch for whichever depolarizing types appear
+    depol_helpers = (("DEPOLARIZE1", "_depol1_effective"), ("DEPOLARIZE2", "_depol2_effective"))
+    branches = [
+        (gate, helper)
+        for gate, helper in depol_helpers
+        if any(p.gate_type == gate for p in parameters)
+    ]
+    if branches:
+        lines = []
+        for i, (gate, helper) in enumerate(branches):
+            lines.append(f'            {"if" if i == 0 else "elif"} gate_type == "{gate}":')
+            lines.append(f"                p_eff = {helper}(p)")
+        lines += ["            else:", "                p_eff = p"]
+        p_eff_code = "\n".join(lines)
     else:
         p_eff_code = "            p_eff = p"
 
     # Build the complete function with a loop
-    code = f"""def average_detector_event_fraction({param_signature}):
+    code = f"""def average_detector_event_fraction({_param_signature(parameters)}):
     \"\"\"
     Average detector event fraction across all {num_detectors} detectors.
 

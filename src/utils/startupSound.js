@@ -1,8 +1,9 @@
 let audioContext = null;
-let sequenceIndex = 0;
-let lightSequenceIndex = 0;
-const SOUND_SEQUENCE = ['firelight', 'ember', 'clearing', 'firelight']; // Dark mode: campfire at night
-const LIGHT_SOUND_SEQUENCE = ['daybreak', 'birdsong', 'meadow', 'daybreak']; // Light mode: brisk sunrise morning
+let darkIndex = 0;
+let lightIndex = 0;
+// Function declarations hoist, so the sequences can be declared up here
+const DARK_SEQUENCE = [playFirelight, playEmber, playClearing, playFirelight]; // Dark mode: campfire at night
+const LIGHT_SEQUENCE = [playDaybreak, playBirdsong, playMeadow, playDaybreak]; // Light mode: brisk sunrise morning
 
 function getAudioContext() {
   if (!audioContext) {
@@ -142,9 +143,7 @@ function createPluck(ctx, dest, freq, startTime, decayTime, volume, pan = 0, war
 // G major arpeggio with a touch of added 9th for sweetness
 // ============================================================
 
-function playFirelightFull() {
-  const ctx = getAudioContext();
-  if (ctx.state === 'suspended') ctx.resume();
+function playFirelight(ctx) {
   const now = ctx.currentTime;
 
   // Warm, intimate reverb
@@ -184,9 +183,7 @@ function playFirelightFull() {
 // Open low E drone with delicate upper voice movement
 // ============================================================
 
-function playEmberFull() {
-  const ctx = getAudioContext();
-  if (ctx.state === 'suspended') ctx.resume();
+function playEmber(ctx) {
   const now = ctx.currentTime;
 
   const { filter } = createAudioChain(ctx, 2.4, 3.2, 0.65, 0.35, 0.82);
@@ -224,9 +221,7 @@ function playEmberFull() {
 // Stacked 4ths opening up to warmth
 // ============================================================
 
-function playClearingFull() {
-  const ctx = getAudioContext();
-  if (ctx.state === 'suspended') ctx.resume();
+function playClearing(ctx) {
   const now = ctx.currentTime;
 
   const { filter } = createAudioChain(ctx, 2.3, 3.0, 0.66, 0.34, 0.84);
@@ -270,9 +265,7 @@ function playClearingFull() {
 // Crisper reverb, more articulate attack
 // ============================================================
 
-function playDaybreakFull() {
-  const ctx = getAudioContext();
-  if (ctx.state === 'suspended') ctx.resume();
+function playDaybreak(ctx) {
   const now = ctx.currentTime;
 
   // Crisper, more airy reverb for morning clarity
@@ -317,9 +310,7 @@ function playDaybreakFull() {
 // Quick, gentle phrases suggesting morning birds stirring
 // ============================================================
 
-function playBirdsongFull() {
-  const ctx = getAudioContext();
-  if (ctx.state === 'suspended') ctx.resume();
+function playBirdsong(ctx) {
   const now = ctx.currentTime;
 
   // Light, airy reverb
@@ -367,9 +358,7 @@ function playBirdsongFull() {
 // Sus4 → major resolution with a shimmer of lydian
 // ============================================================
 
-function playMeadowFull() {
-  const ctx = getAudioContext();
-  if (ctx.state === 'suspended') ctx.resume();
+function playMeadow(ctx) {
   const now = ctx.currentTime;
 
   // Open, spacious reverb - the wide meadow
@@ -417,40 +406,15 @@ function playMeadowFull() {
 
 export function playStartupSound(isDark = true) {
   try {
+    const ctx = getAudioContext();
+    if (ctx.state === 'suspended') ctx.resume();
+
     if (isDark) {
-      // Dark mode: campfire at night
-      const currentSound = SOUND_SEQUENCE[sequenceIndex];
-
-      switch (currentSound) {
-        case 'firelight':
-          playFirelightFull();
-          break;
-        case 'ember':
-          playEmberFull();
-          break;
-        case 'clearing':
-          playClearingFull();
-          break;
-      }
-
-      sequenceIndex = (sequenceIndex + 1) % SOUND_SEQUENCE.length;
+      DARK_SEQUENCE[darkIndex](ctx);
+      darkIndex = (darkIndex + 1) % DARK_SEQUENCE.length;
     } else {
-      // Light mode: brisk sunrise morning
-      const currentSound = LIGHT_SOUND_SEQUENCE[lightSequenceIndex];
-
-      switch (currentSound) {
-        case 'daybreak':
-          playDaybreakFull();
-          break;
-        case 'birdsong':
-          playBirdsongFull();
-          break;
-        case 'meadow':
-          playMeadowFull();
-          break;
-      }
-
-      lightSequenceIndex = (lightSequenceIndex + 1) % LIGHT_SOUND_SEQUENCE.length;
+      LIGHT_SEQUENCE[lightIndex](ctx);
+      lightIndex = (lightIndex + 1) % LIGHT_SEQUENCE.length;
     }
   } catch (e) {
     console.warn('Startup sound failed:', e);
@@ -458,6 +422,6 @@ export function playStartupSound(isDark = true) {
 }
 
 export function resetStartupSound() {
-  sequenceIndex = 0;
-  lightSequenceIndex = 0;
+  darkIndex = 0;
+  lightIndex = 0;
 }

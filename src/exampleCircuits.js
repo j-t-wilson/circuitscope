@@ -5,7 +5,7 @@ export const EXAMPLE_CIRCUITS = [
     id: 'bit-flip-d3',
     name: 'd=3 Bit Flip Code',
     shortName: 'd=3 Bit Flip',
-    description: 'd=3 repetition code, 5 rounds, compact REPEAT form',
+    description: 'd=3 repetition code, 4 rounds, compact REPEAT form',
     circuit: `R 0 1 2 3 4
 X_ERROR(0.001) 0 1 2 3 4
 TICK
@@ -19,7 +19,7 @@ X_ERROR(0.01) 1 3
 M 1 3
 DETECTOR(1, 0) rec[-2]
 DETECTOR(3, 0) rec[-1]
-REPEAT 4 {
+REPEAT 3 {
     TICK
     R 1 3
     X_ERROR(0.001) 1 3
@@ -36,9 +36,6 @@ REPEAT 4 {
     DETECTOR(1, 0) rec[-2] rec[-4]
     DETECTOR(3, 0) rec[-1] rec[-3]
 }
-TICK
-R 1 3
-X_ERROR(0.001) 1 3
 TICK
 X_ERROR(0.01) 0 2 4
 M 0 2 4
@@ -87,9 +84,6 @@ REPEAT 2 {
     DETECTOR(5, 0) rec[-2] rec[-6]
     DETECTOR(7, 0) rec[-1] rec[-5]
 }
-TICK
-R 1 3 5 7
-X_ERROR(0.001) 1 3 5 7
 TICK
 H 0 2 4 6 8
 TICK
@@ -166,8 +160,6 @@ REPEAT 2 {
     DETECTOR(4, 4, 0) rec[-2] rec[-10]
     DETECTOR(4, 6, 0) rec[-1] rec[-9]
 }
-TICK
-R 2 9 11 13 14 16 18 25
 TICK
 X_ERROR(0.01) 1 3 5 8 10 12 15 17 19
 M 1 3 5 8 10 12 15 17 19

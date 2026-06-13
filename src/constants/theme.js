@@ -29,6 +29,10 @@ export const darkTheme = {
   error: '#ff6f7d',
   errorDim: '#6a2730',
   errorSoft: 'rgba(255, 111, 125, 0.15)',
+  measureSoft: 'rgba(123, 215, 167, 0.15)',
+  // Highlighted error gradient (timeline): must contrast with flat errorDim
+  errorBright: '#ff6f7d',
+  errorDeep: '#6a2730',
   success: '#77d394',
   warning: '#f3b65f',
   text: '#f0eadf',
@@ -44,22 +48,24 @@ export const darkTheme = {
   shadowSoft: '0 18px 46px rgba(0, 0, 0, 0.26)',
 };
 
+// Light mode is warm paper/cream rather than cold blue-white: same instrument
+// in daylight. Accent hues match dark mode; only the neutral ramp is re-tinted.
 export const lightTheme = {
   mode: 'light',
-  bg: '#edf3f1',
-  bgLight: '#f7faf8',
-  bgLighter: '#ffffff',
-  panel: 'rgba(255, 255, 255, 0.78)',
-  panelSolid: '#fbfdfb',
-  panelRaised: '#ffffff',
-  panelWarm: 'rgba(255, 246, 232, 0.82)',
-  field: '#f3f7f5',
-  fieldAlt: '#e7efed',
-  glass: 'rgba(255, 255, 255, 0.72)',
-  glassStrong: 'rgba(255, 255, 255, 0.94)',
-  line: 'rgba(35, 62, 65, 0.13)',
-  lineStrong: 'rgba(31, 94, 99, 0.28)',
-  lineWarm: 'rgba(176, 105, 52, 0.22)',
+  bg: '#f2ede3',
+  bgLight: '#faf6ec',
+  bgLighter: '#fffdf6',
+  panel: 'rgba(255, 252, 243, 0.78)',
+  panelSolid: '#fcf9f0',
+  panelRaised: '#fffdf6',
+  panelWarm: 'rgba(252, 240, 219, 0.85)',
+  field: '#f6f1e7',
+  fieldAlt: '#ece5d7',
+  glass: 'rgba(255, 252, 243, 0.72)',
+  glassStrong: 'rgba(255, 253, 247, 0.94)',
+  line: 'rgba(72, 59, 38, 0.14)',
+  lineStrong: 'rgba(38, 90, 88, 0.30)',
+  lineWarm: 'rgba(176, 105, 52, 0.24)',
   accent: '#147f86',
   accentDim: '#9fc9c8',
   accentSoft: 'rgba(20, 127, 134, 0.11)',
@@ -70,21 +76,46 @@ export const lightTheme = {
   amberDim: '#e4c797',
   amberSoft: 'rgba(184, 117, 44, 0.12)',
   error: '#bf3448',
-  errorDim: '#f0c6cc',
+  errorDim: '#c95f72',
   errorSoft: 'rgba(191, 52, 72, 0.12)',
+  measureSoft: 'rgba(47, 139, 100, 0.12)',
+  // Hotter and deeper than the flat errorDim fill so highlights still pop
+  errorBright: '#e23a55',
+  errorDeep: '#7a1525',
   success: '#277c55',
   warning: '#b8752c',
-  text: '#1f2a2d',
-  textDim: '#637174',
-  textFaint: '#8a9798',
+  text: '#2a2520',
+  textDim: '#6b6457',
+  textFaint: '#90897a',
   qubit: '#2e7ca1',
   gate: '#7254a0',
   measure: '#2f8b64',
   detector: '#b8752c',
   detectorBright: '#8a531f',
   observable: '#9c4f82',
-  shadow: '0 24px 70px rgba(34, 48, 50, 0.16)',
-  shadowSoft: '0 16px 42px rgba(34, 48, 50, 0.12)',
+  shadow: '0 24px 70px rgba(58, 46, 28, 0.16)',
+  shadowSoft: '0 16px 42px rgba(58, 46, 28, 0.12)',
 };
 
 export const C = darkTheme;
+
+// Each view's accent identity, shared by the MainPanel title bar and the
+// header's active view tab so the tab you click and the title you land on
+// agree. Hues are semantic, reusing the color the view's content is drawn in:
+// timeline = detector amber, analysis = formula teal, compare = measured-data
+// green, code = copper (raw source), DEM = error rose.
+export function viewAccent(C, mode) {
+  const map = {
+    timeline: { main: C.detector, bright: C.detectorBright, soft: C.amberSoft },
+    analysis: { main: C.accent, soft: C.accentSoft },
+    compare: { main: C.measure, soft: C.measureSoft },
+    code: { main: C.copper, soft: C.copperSoft },
+    dem: { main: C.error, soft: C.errorSoft },
+  };
+  const { main, bright, soft } = map[mode] || map.timeline;
+  return {
+    main,
+    soft,
+    gradient: `linear-gradient(180deg, ${bright || main}, color-mix(in srgb, ${main} 72%, ${C.bg}))`,
+  };
+}

@@ -1,6 +1,6 @@
 # Mathematical Framework
 
-This document describes the analytical calculations owned by CircuitScope.
+This document describes the calculations done by CircuitScope.
 Stim provides the circuit parser, detector error model (DEM), explanations, and
 sampling machinery. CircuitScope combines those Stim outputs into event
 fractions, contribution budgets, sensitivities, and generated Python formulas.
@@ -16,6 +16,7 @@ fractions, contribution budgets, sensitivities, and generated Python formulas.
 7. [Stim REPEAT Loops](#7-stim-repeat-loops)
 8. [Implementation Reference](#8-implementation-reference)
 9. [Core Formula Derivation](#9-core-formula-derivation)
+10. [Measured-Data Parameter Fitting](#10-measured-data-parameter-fitting)
 
 ---
 
@@ -151,8 +152,7 @@ and uses the same maxima in the Analysis view parameter controls.
 
 The sidebar's contribution breakdown explains which mechanisms are responsible
 for a selected detector's event fraction. These contributions are log-weight
-budget shares. They are useful for ranking mechanisms, but they are not direct
-additive probabilities.
+budget shares. They are useful for ranking mechanisms, but they deviate from a linear budget at higher error rates.
 
 ### Error Grouping
 
@@ -385,3 +385,90 @@ $$b = \prod_i (1 - 2p_{\text{eff},i})^{c_i}$$
 
 Substituting into $P(D)=\frac{1}{2}(1-b)$ gives the core event-fraction
 formula.
+
+---
+
+## 10. Measured-Data Parameter Fitting
+
+Implemented in `src/utils/parameterFit.js` (tested by `npm run test:js`).
+
+### Linearization
+
+Every detector's event fraction has the form
+
+$$P_i = \frac{1}{2}\left(1 - \prod_j (1 - 2q_j)^{c_{ij}}\right)$$
+
+where $q_j$ is the effective toggle probability of parameter $j$ and
+$c_{ij}$ is the integer count matrix exported by the average formula
+(`detector_counts`). In the transformed coordinates
+
+$$y_i = \ln(1 - 2P_i), \qquad x_j = \ln(1 - 2q_j)$$
+
+the model is exactly linear:
+
+$$y = C\,x$$
+
+so fitting measured fractions is closed-form weighted linear least squares —
+no iterative optimizer. Fractions at or above $1/2$ saturate the transform
+and carry no rate information; they are clamped with a warning.
+
+### Weights
+
+Under the model-is-correct hypothesis (the same convention as the displayed
+z-scores), a measured fraction has standard deviation
+
+$$\sigma_{P_i} = \sqrt{\max\!\big(p_i(1-p_i),\, 1/N\big)/N}$$
+
+for $N$ shots, which propagates to the transformed coordinate as
+
+$$\sigma_{y_i} = \frac{2\,\sigma_{P_i}}{1 - 2p_i}$$
+
+evaluated at the nominal model. Weights are $w_i = 1/\sigma_{y_i}^2$
+(uniform when no shot count is given). Reported $\chi^2$ values are
+recomputed in probability space under each candidate model, so they match
+the z-scores shown elsewhere in the app.
+
+### Ridge anchor and constraints
+
+The normal equations are regularized toward the nominal rates:
+
+$$\min_x\; \|W^{1/2}(y - Cx)\|^2 + \sum_j \lambda_j (x_j - x_j^0)^2,
+\qquad \lambda_j = 10^{-6}\,(C^\top W C)_{jj}$$
+
+Rank-deficient directions of $C$ (parameters that only appear in fixed
+combinations) stay at the model the user wrote down instead of exploding;
+well-constrained parameters are essentially unaffected. Rates cannot be
+negative, which in transformed coordinates means $x_j \le 0$: positive
+solutions are clamped to the zero-rate boundary and the remaining free
+parameters refit (a small active-set loop).
+
+Per-parameter uncertainties come from the inverse of the (ridge-stabilized)
+normal matrix, converted to raw-rate units through
+$\mathrm{d}p/\mathrm{d}x = \tfrac{1}{2}e^{x} \big/ (\mathrm{d}q/\mathrm{d}p)$
+and the closed-form inverse decorrelation
+($d = \tfrac{3}{4}(1 - e^{2x})$ for `DEPOLARIZE1`,
+$d = \tfrac{15}{16}(1 - e^{8x})$ for `DEPOLARIZE2`).
+
+### Scenario ranking
+
+The experimentalist's question is sparse — "which knob is off" — so the
+headline output is not the dense fit but a ranked scenario list:
+
+- **Single knob**: for each parameter, a 1-D weighted fit with all others at
+  nominal, ranked by resulting $\chi^2/\mathrm{dof}$.
+- **Two knobs**: greedy forward selection — the best single knob refit
+  jointly with each remaining parameter (shown only when this meaningfully
+  beats the best single).
+- **Dense fit**: all constrained parameters at once — the best-achievable
+  floor. If even this $\chi^2/\mathrm{dof}$ is poor, no rate adjustment
+  explains the data and the model is likely missing a mechanism.
+
+### Identifiability
+
+- Parameters with all-zero count columns over the measured detectors have no
+  leverage and are reported as unconstrained.
+- Exactly proportional count columns are grouped and reported: only the
+  combination of those parameters is constrained by the data.
+- Identical rows of $C$ (detectors in the bulk of repeated rounds) are
+  benign — they act as repeated measurements — and are surfaced as the
+  "unique response patterns" count.

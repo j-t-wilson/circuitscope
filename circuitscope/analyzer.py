@@ -47,7 +47,8 @@ class CircuitScopeAnalyzer:
         self._explanations_cache = None
         self._detecting_regions_cache = None
         self._tick_augmented_circuit_cache = None
-        self._tick_mapping_cache = None
+        self._region_instants_cache = None
+        self._circuit_scan_cache = None
 
     @property
     def dem(self) -> stim.DetectorErrorModel:
@@ -64,8 +65,8 @@ class CircuitScopeAnalyzer:
         return self._explanations_cache
 
     @property
-    def detecting_regions(self) -> Dict[str, Dict[int, List[Dict[str, Any]]]]:
-        """Lazily compute and cache detecting regions."""
+    def detecting_regions(self) -> Dict[str, List[Dict[str, Any]]]:
+        """Lazily compute and cache detecting-region segments."""
         if self._detecting_regions_cache is None:
             self._detecting_regions_cache = self._compute_detecting_regions()
         return self._detecting_regions_cache
@@ -91,32 +92,38 @@ class CircuitScopeAnalyzer:
             if getattr(target, 'is_qubit_target', False)
         ]
 
-    def _compute_detecting_regions(self) -> Dict[str, Dict[int, List[Dict[str, Any]]]]:
+    def _compute_detecting_regions(self) -> Dict[str, List[Dict[str, Any]]]:
         """
-        Convert stim detecting_regions output to JSON-serializable format.
+        Compute detecting-region segments per detector.
 
-        Uses TICK-augmented circuit for high time resolution, then maps back
-        to original timeline ticks.
+        Uses a TICK-augmented circuit (a TICK after every instruction) so the
+        sensitivity Pauli is known between every pair of instructions, then
+        merges consecutive instants with the same Pauli into segments.
 
         Returns:
-            Dictionary mapping detector names (e.g., "D0") to their detecting regions.
-            Each region maps tick indices to lists of qubit sensitivities (X or Z type Paulis).
+            Dictionary mapping detector names (e.g., "D0") to lists of segments
+            {qubit, pauli, start, end}. ``start``/``end`` are {tick, order}
+            positions in the timeline: a segment begins at the instruction that
+            created the sensitivity and ends at the instruction that changed or
+            consumed it. ``order: None`` marks a tick boundary (a sensitivity
+            already present when the circuit starts with a TICK); ``end: None``
+            means the sensitivity survives to the end of the circuit. Paulis
+            are X, Y, or Z (Y means the detector is flipped by both X- and
+            Z-type errors on that qubit).
         """
         try:
-            # Get or build TICK-augmented circuit
             if self._tick_augmented_circuit_cache is None:
-                augmented, tick_mapping = self._build_tick_augmented_circuit()
-                self._tick_augmented_circuit_cache = augmented
-                self._tick_mapping_cache = tick_mapping
-            else:
-                augmented = self._tick_augmented_circuit_cache
-                tick_mapping = self._tick_mapping_cache
+                self._tick_augmented_circuit_cache, self._region_instants_cache = \
+                    self._build_tick_augmented_circuit()
+            instants = self._region_instants_cache
 
             # Get detecting regions from augmented circuit (high resolution)
-            raw_regions = augmented.detecting_regions(ignore_anticommutation_errors=True)
+            raw_regions = self._tick_augmented_circuit_cache.detecting_regions(
+                ignore_anticommutation_errors=True)
         except Exception:
             return {}
 
+        num_instants = len(instants)
         result = {}
         for dem_target, tick_sensitivities in raw_regions.items():
             target_str = str(dem_target)
@@ -124,43 +131,45 @@ class CircuitScopeAnalyzer:
             if not target_str.startswith('D'):
                 continue
 
-            # Map augmented ticks back to original timeline ticks
-            # and merge sensitivities that map to the same original tick
-            original_tick_sensitivities = {}
-
+            # Per-qubit sensitivity at each instant (instant i = the moment
+            # right after the instruction described by instants[i])
+            per_qubit: Dict[int, Dict[int, str]] = {}
             for aug_tick, pauli_string in tick_sensitivities.items():
-                # Map to original timeline tick
-                orig_tick = tick_mapping.get(aug_tick, aug_tick)
-
-                # Initialize set for deduplication
-                if orig_tick not in original_tick_sensitivities:
-                    original_tick_sensitivities[orig_tick] = set()
-
-                # Extract sensitivities (skip Y-type, only X and Z)
+                if aug_tick >= num_instants:
+                    continue
                 pauli_str = str(pauli_string)
-                sign_offset = 1  # Skip sign character (+/-)
-
                 for qubit_idx in pauli_string.pauli_indices():
-                    pauli_char = pauli_str[qubit_idx + sign_offset]
-                    if pauli_char in ('X', 'Z'):
-                        original_tick_sensitivities[orig_tick].add((qubit_idx, pauli_char))
+                    pauli_char = pauli_str[qubit_idx + 1]  # +1 skips the sign character
+                    per_qubit.setdefault(qubit_idx, {})[aug_tick] = pauli_char
 
-            # Convert to JSON-serializable format
-            detector_regions = {}
-            for tick, sensitivities_set in original_tick_sensitivities.items():
-                sensitivities_list = [
-                    {'qubit': q, 'pauli': p}
-                    for q, p in sorted(sensitivities_set)
-                ]
-                if sensitivities_list:
-                    detector_regions[tick] = sensitivities_list
+            # Merge runs of identical sensitivity into segments. Sensitivity
+            # only changes across an instruction, so run edges always land on
+            # instruction instants (never plain tick boundaries).
+            segments = []
+            for qubit_idx in sorted(per_qubit):
+                by_instant = per_qubit[qubit_idx]
+                run_pauli = None
+                run_start = 0
+                for i in range(num_instants + 1):
+                    pauli = by_instant.get(i)
+                    if pauli == run_pauli:
+                        continue
+                    if run_pauli is not None:
+                        segments.append({
+                            'qubit': qubit_idx,
+                            'pauli': run_pauli,
+                            'start': instants[run_start],
+                            'end': instants[i] if i < num_instants else None,
+                        })
+                    run_pauli = pauli
+                    run_start = i
 
-            if detector_regions:
-                result[target_str] = detector_regions
+            if segments:
+                result[target_str] = segments
 
         return result
 
-    def _build_tick_augmented_circuit(self) -> Tuple[stim.Circuit, Dict[int, int]]:
+    def _build_tick_augmented_circuit(self) -> Tuple[stim.Circuit, List[Dict[str, Any]]]:
         """
         Build a version of the circuit with TICKs after every instruction.
 
@@ -169,34 +178,37 @@ class CircuitScopeAnalyzer:
         Returns:
             Tuple of:
             - augmented_circuit: Circuit with TICK after each non-meta instruction
-            - tick_mapping: Dict mapping augmented_tick -> original_timeline_tick
+            - instants: instants[augmented_tick] = {tick, order} timeline position
+              of the instruction that augmented tick follows; ``order`` matches
+              the op order in get_timeline(). Original TICKs produce a boundary
+              instant {tick: <new tick>, order: None}.
         """
         augmented = stim.Circuit()
-        tick_mapping = {}
+        instants: List[Dict[str, Any]] = []
 
-        original_tick = 0
-        augmented_tick = 0
+        tick = 0
+        order = 0
 
         for inst in self.circuit:  # self.circuit is already flattened
             inst_name = inst.name
 
             if inst_name == 'TICK':
-                # Original TICK: pass through and map ticks
+                # Original TICK: a boundary instant at the start of the next tick
                 augmented.append(inst)
-                original_tick += 1  # Increment FIRST - TICK marks start of next period
-                tick_mapping[augmented_tick] = original_tick  # Then map to NEW tick
-                augmented_tick += 1
+                tick += 1
+                order = 0
+                instants.append({'tick': tick, 'order': None})
             elif inst_name in META_INSTRUCTIONS:
-                # Meta instructions: no TICK insertion, don't advance ticks
+                # Meta instructions: no TICK insertion, don't advance instants
                 augmented.append(inst)
             else:
                 # Regular instruction: append it, then insert TICK
                 augmented.append(inst)
                 augmented.append('TICK')
-                tick_mapping[augmented_tick] = original_tick
-                augmented_tick += 1
+                instants.append({'tick': tick, 'order': order})
+                order += 1
 
-        return augmented, tick_mapping
+        return augmented, instants
 
     @staticmethod
     def _format_pauli_product(flipped_pauli_product) -> str:
@@ -243,60 +255,32 @@ class CircuitScopeAnalyzer:
             return 'gate'
         return 'other'
 
-    def _build_measurement_record(self) -> List[Dict[str, Any]]:
+    def _scan_circuit(self) -> Tuple[List[Dict[str, Any]], Dict[int, Dict[str, Any]]]:
         """
-        Build a list of measurement records in circuit order.
+        Walk the circuit once, recording measurements and detector positions.
 
-        Each entry contains:
-        - tick: which tick the measurement occurred in
-        - qubit: which qubit was measured
-        - index: the measurement index (for rec[] references)
+        Both records are built in the same pass because a DETECTOR's rec[]
+        offsets are relative to the measurement count at the point the
+        DETECTOR appears.
+
+        Returns:
+            Tuple of:
+            - measurements: List of {tick, qubit, index} in circuit order
+            - positions: Dict mapping detector ID to {tick, qubit, measurement_indices},
+              where the position is the tick/qubit of the detector's latest referenced
+              measurement (matching how Stim positions detectors in circuit.diagram())
         """
-        measurements = []
+        measurements: List[Dict[str, Any]] = []
+        positions: Dict[int, Dict[str, Any]] = {}
         tick = 0
-
-        for inst in self.circuit:
-            name = inst.name
-            if name == 'TICK':
-                tick += 1
-                continue
-
-            if name in MEASURE_TYPES:
-                for qubit in self._extract_qubits(inst):
-                    measurements.append({
-                        'tick': tick,
-                        'qubit': qubit,
-                        'index': len(measurements)
-                    })
-
-        return measurements
-
-    def _get_detector_positions(self) -> Dict[int, Dict[str, Any]]:
-        """
-        Compute detector positions based on their measurement references.
-
-        A detector is positioned at the tick/qubit of its latest referenced measurement,
-        matching how Stim positions detectors in circuit.diagram().
-
-        Returns a dict mapping detector ID to {tick, qubit, measurement_indices}.
-        measurement_indices is a list of absolute measurement indices that the detector references.
-        """
-        # Build measurement records as we iterate, since rec[] offsets are relative
-        # to the measurement count AT THE TIME the DETECTOR is encountered
-        measurements = []
-        tick = 0
-        positions = {}
-        detector_id = 0
 
         for inst in self.circuit:
             name = inst.name
 
             if name == 'TICK':
                 tick += 1
-                continue
 
-            if name in MEASURE_TYPES:
-                # Record measurements as we encounter them
+            elif name in MEASURE_TYPES:
                 for qubit in self._extract_qubits(inst):
                     measurements.append({
                         'tick': tick,
@@ -305,42 +289,39 @@ class CircuitScopeAnalyzer:
                     })
 
             elif name == 'DETECTOR':
-                # Parse rec[] references from the detector instruction
-                # Offsets are relative to current measurement count
-                num_measurements = len(measurements)
-                latest_tick = -1
-                latest_qubit = 0
+                latest = None
                 measurement_indices = []
-
                 for t in inst.targets_copy():
-                    # Check if this is a measurement record target
-                    if hasattr(t, 'is_measurement_record_target') and t.is_measurement_record_target:
-                        offset = t.value  # negative offset like -1, -2, -3
-                        # Convert relative offset to absolute index
-                        abs_idx = num_measurements + offset  # offset is negative
-                        if 0 <= abs_idx < num_measurements:
-                            meas = measurements[abs_idx]
+                    if getattr(t, 'is_measurement_record_target', False):
+                        abs_idx = len(measurements) + t.value  # t.value is a negative offset
+                        if 0 <= abs_idx < len(measurements):
                             measurement_indices.append(abs_idx)
-                            # Track the latest (highest tick) measurement
-                            if meas['tick'] > latest_tick:
-                                latest_tick = meas['tick']
-                                latest_qubit = meas['qubit']
-                            elif meas['tick'] == latest_tick:
-                                # If same tick, use the qubit (could be arbitrary choice)
-                                latest_qubit = meas['qubit']
+                            meas = measurements[abs_idx]
+                            if latest is None or meas['tick'] >= latest['tick']:
+                                latest = meas
 
-                positions[detector_id] = {
-                    'tick': latest_tick if latest_tick >= 0 else 0,
-                    'qubit': latest_qubit,
+                positions[len(positions)] = {
+                    'tick': latest['tick'] if latest else 0,
+                    'qubit': latest['qubit'] if latest else 0,
                     'measurement_indices': measurement_indices
                 }
-                detector_id += 1
 
-        return positions
+        return measurements, positions
+
+    @property
+    def _circuit_scan(self) -> Tuple[List[Dict[str, Any]], Dict[int, Dict[str, Any]]]:
+        """Lazily compute and cache the (measurements, detector positions) scan."""
+        if self._circuit_scan_cache is None:
+            self._circuit_scan_cache = self._scan_circuit()
+        return self._circuit_scan_cache
+
+    def get_measurements(self) -> List[Dict[str, Any]]:
+        """Return measurement records ({tick, qubit, index}) in circuit order."""
+        return self._circuit_scan[0]
 
     def get_detectors(self) -> List[Dict[str, Any]]:
         """Extract all detector information from the circuit."""
-        positions = self._get_detector_positions()
+        positions = self._circuit_scan[1]
         detectors = []
 
         for det_id in range(self.get_num_detectors()):
@@ -371,18 +352,12 @@ class CircuitScopeAnalyzer:
         dem_probability_map = {}
         for inst in self.dem:
             if inst.type == "error":
-                prob = inst.args_copy()[0] if inst.args_copy() else 0.0
+                args = inst.args_copy()
                 targets = tuple(sorted(str(t) for t in inst.targets_copy()))
-                dem_probability_map[targets] = prob
+                dem_probability_map[targets] = float(args[0]) if args else 0.0
 
         for exp in self.explanations:
-            # Parse DEM terms
-            dem_terms = []
-            for term in exp.dem_error_terms:
-                dem_target = str(term.dem_target)
-                dem_terms.append({
-                    'target': dem_target
-                })
+            dem_terms = [{'target': str(term.dem_target)} for term in exp.dem_error_terms]
 
             # Parse circuit error locations
             locations = []
@@ -470,29 +445,18 @@ class CircuitScopeAnalyzer:
                 if args:
                     rate = args[0]
 
-            op_type = self._instruction_type(name)
-            order = len(current_ops)
-
-            # Handle 2-qubit gates specially (pair them)
+            # 2-qubit gates render as pairs
             if name in TWO_QUBIT_TYPES and len(qubits) >= 2:
-                paired_qubits = [[qubits[i], qubits[i+1]] for i in range(0, len(qubits)-1, 2)]
-                current_ops.append({
-                    'name': name,
-                    'qubits': paired_qubits,
-                    'type': op_type,
-                    'rate': rate,
-                    'order': order,
-                    'instruction_index': idx
-                })
-            else:
-                current_ops.append({
-                    'name': name,
-                    'qubits': qubits,
-                    'type': op_type,
-                    'rate': rate,
-                    'order': order,
-                    'instruction_index': idx
-                })
+                qubits = [[qubits[i], qubits[i+1]] for i in range(0, len(qubits)-1, 2)]
+
+            current_ops.append({
+                'name': name,
+                'qubits': qubits,
+                'type': self._instruction_type(name),
+                'rate': rate,
+                'order': len(current_ops),
+                'instruction_index': idx
+            })
 
         # Don't forget the last tick
         if current_ops:
@@ -532,44 +496,38 @@ class CircuitScopeAnalyzer:
 
     def export_json(self) -> Dict[str, Any]:
         """Export all analysis data as a JSON-serializable dictionary."""
-        # Get detailed budgets which includes event fractions
         detailed_result = self.get_detailed_error_budgets()
 
-        # Get basic detector info
+        def at(values: List[float], index: int) -> float:
+            # Detectors are enumerated from the circuit detector count; ones with
+            # no error mechanisms may fall outside the DEM-derived lists.
+            return values[index] if index < len(values) else 0.0
+
         detectors = self.get_detectors()
-
-        # Add event_fraction to each detector
         for d in detectors:
-            det_id = d['id']
-            if det_id < len(detailed_result.det_p_dem):
-                d['event_fraction'] = detailed_result.det_p_dem[det_id]
-            else:
-                d['event_fraction'] = 0.0
+            d['event_fraction'] = at(detailed_result.det_p_dem, d['id'])
 
-        # Convert detailed budgets to JSON-serializable format
-        # Budget is List[Dict[str, BudgetItem]] indexed by detector ID
-        # We want to map it to detector names for easier frontend use
+        # Map budgets (indexed by detector ID) to detector names for the frontend
         detailed_budgets: Dict[str, Dict[str, Any]] = {}
         for d in detectors:
             det_id = d['id']
-            det_name = d['name']
-            if det_id < len(detailed_result.budget):
-                budget_dict = detailed_result.budget[det_id]
-                detailed_budgets[det_name] = {
-                    'event_fraction': detailed_result.det_p_dem[det_id] if det_id < len(detailed_result.det_p_dem) else 0.0,
-                    'event_fraction_from_explain': detailed_result.det_p_from_explain[det_id] if det_id < len(detailed_result.det_p_from_explain) else 0.0,
-                    'breakdown': {
-                        key: {
-                            'count': item.count,
-                            'sum_p': item.sum_p,
-                            'p_if_only_this_group': item.p_if_only_this_group,
-                            'log_weight': item.log_weight,
-                            'share_of_log_weight': item.share_of_log_weight,
-                            'example_locations': list(item.example_locations),
-                        }
-                        for key, item in budget_dict.items()
+            if det_id >= len(detailed_result.budget):
+                continue
+            detailed_budgets[d['name']] = {
+                'event_fraction': at(detailed_result.det_p_dem, det_id),
+                'event_fraction_from_explain': at(detailed_result.det_p_from_explain, det_id),
+                'breakdown': {
+                    key: {
+                        'count': item.count,
+                        'sum_p': item.sum_p,
+                        'p_if_only_this_group': item.p_if_only_this_group,
+                        'log_weight': item.log_weight,
+                        'share_of_log_weight': item.share_of_log_weight,
+                        'example_locations': list(item.example_locations),
                     }
+                    for key, item in detailed_result.budget[det_id].items()
                 }
+            }
 
         return {
             'circuit_text': self.get_circuit_text(),
@@ -578,7 +536,7 @@ class CircuitScopeAnalyzer:
             'detectors': detectors,
             'detector_errors': self.get_detector_errors(),
             'timeline': self.get_timeline(),
-            'measurements': self._build_measurement_record(),
+            'measurements': self.get_measurements(),
             'detailed_budgets': detailed_budgets,
             'detecting_regions': self.detecting_regions,
         }

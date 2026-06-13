@@ -19,6 +19,21 @@ export function getEffectiveP(gateType, value) {
   return value; // X_ERROR, Y_ERROR, Z_ERROR, etc.
 }
 
+// Rewrite params with each parameter's count for a specific detector.
+// detectorCounts is { param_name: [count_for_d0, count_for_d1, ...] }
+function paramsForDetector(params, detectorCounts, detId) {
+  return params.map(p => ({ ...p, count: detectorCounts[p.name]?.[detId] ?? 0 }));
+}
+
+// Per-detector event fractions (indexed by detector id) under the given
+// parameter values — used to keep all surfaces live while parameters are
+// modified anywhere in the app.
+export function computeDetectorFractions(params, detectorCounts, numDetectors) {
+  return Array.from({ length: numDetectors }, (_, detId) =>
+    computeEventFraction(paramsForDetector(params, detectorCounts, detId))
+  );
+}
+
 // Compute event fraction from parameters: P(D) = 0.5 * (1 - Π(1 - 2*p_eff)^count)
 export function computeEventFraction(params) {
   let prod = 1.0;
@@ -30,20 +45,10 @@ export function computeEventFraction(params) {
 }
 
 // Compute average event fraction across all detectors
-// detectorCounts is { param_name: [count_for_d0, count_for_d1, ...] }
 export function computeAverageEventFraction(params, detectorCounts, numDetectors) {
   let total = 0.0;
   for (let detId = 0; detId < numDetectors; detId++) {
-    // Build parameter list for this detector
-    let prod = 1.0;
-    for (const p of params) {
-      const count = detectorCounts[p.name]?.[detId] ?? 0;
-      if (count > 0) {
-        const pEff = getEffectiveP(p.gate_type, p.value);
-        prod *= Math.pow(1 - 2 * pEff, count);
-      }
-    }
-    total += 0.5 * (1 - prod);
+    total += computeEventFraction(paramsForDetector(params, detectorCounts, detId));
   }
   return total / numDetectors;
 }
@@ -78,8 +83,8 @@ export function computeSensitivities(params) {
 
   // Compute sensitivity for each parameter
   return params.map((p, i) => {
-    const pEff = pEffs[i];
-    const denom = 1 - 2 * pEff;
+    if (p.count === 0) return 0;
+    const denom = 1 - 2 * pEffs[i];
     if (Math.abs(denom) < 1e-10) return Infinity;
     return p.count * dpEffDp(p.gate_type, p.value) * prod / denom;
   });
@@ -90,41 +95,12 @@ export function computeSensitivities(params) {
 export function computeAverageSensitivities(params, detectorCounts, numDetectors) {
   if (!params.length) return [];
 
-  // Accumulate sensitivities across all detectors
-  const totalSensitivities = params.map(() => 0);
-
+  const totals = params.map(() => 0);
   for (let detId = 0; detId < numDetectors; detId++) {
-    // Build detector-specific params with counts for this detector
-    const detParams = params.map(p => ({
-      ...p,
-      count: detectorCounts[p.name]?.[detId] ?? 0,
-    }));
-
-    // Compute p_eff values and product for this detector
-    const pEffs = detParams.map(p => getEffectiveP(p.gate_type, p.value));
-    let prod = 1.0;
-    for (let i = 0; i < detParams.length; i++) {
-      if (detParams[i].count > 0) {
-        prod *= Math.pow(1 - 2 * pEffs[i], detParams[i].count);
-      }
-    }
-
-    // Compute sensitivity for each parameter for this detector
-    for (let i = 0; i < detParams.length; i++) {
-      const p = detParams[i];
-      if (p.count === 0) continue;
-      const pEff = pEffs[i];
-      const denom = 1 - 2 * pEff;
-      if (Math.abs(denom) < 1e-10) {
-        totalSensitivities[i] += Infinity;
-      } else {
-        totalSensitivities[i] += p.count * dpEffDp(p.gate_type, p.value) * prod / denom;
-      }
-    }
+    const sens = computeSensitivities(paramsForDetector(params, detectorCounts, detId));
+    sens.forEach((s, i) => { totals[i] += s; });
   }
-
-  // Average sensitivities
-  return totalSensitivities.map(s => s / numDetectors);
+  return totals.map(s => s / numDetectors);
 }
 
 // Compute log-weight contribution for each parameter

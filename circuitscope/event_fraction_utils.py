@@ -100,35 +100,26 @@ def _effective_location_probability(loc: stim.CircuitErrorLocation) -> float:
 
     g = gate.upper()
 
-    # Most explicit error instructions carry a single probability parameter.
-    if g in {"X_ERROR", "Y_ERROR", "Z_ERROR", "CORRELATED_ERROR"}:
+    if g in {"X_ERROR", "Y_ERROR", "Z_ERROR", "CORRELATED_ERROR", "DEPOLARIZE1", "DEPOLARIZE2"}:
         if not args:
             raise ValueError(f"{gate} had no args; expected one probability.")
-        return float(args[0])
-
-    # Depolarizing instructions are disjoint channels; convert to independent-per-Pauli prob p.
-    # (This is exactly why your budget needs the conversion.)
-    if g == "DEPOLARIZE1":
-        if not args:
-            raise ValueError("DEPOLARIZE1 had no args; expected one probability.")
-        d = float(args[0])
-        return _decorrelated_depolarize1_independent_pauli_p(d)
-
-    if g == "DEPOLARIZE2":
-        if not args:
-            raise ValueError("DEPOLARIZE2 had no args; expected one probability.")
-        d = float(args[0])
-        return _decorrelated_depolarize2_independent_pauli_p(d)
+        p = float(args[0])
+        # Depolarizing instructions are disjoint channels; convert to an
+        # independent-per-Pauli probability before combining.
+        if g == "DEPOLARIZE1":
+            return _decorrelated_depolarize1_independent_pauli_p(p)
+        if g == "DEPOLARIZE2":
+            return _decorrelated_depolarize2_independent_pauli_p(p)
+        return p
 
     # Measurement instructions can carry a flip prob in parentheses in stim circuits.
     # If this location is a flipped_measurement, treat arg[0] as the flip probability.
     if loc.flipped_measurement is not None and args:
         return float(args[0])
 
-    # If you need more gates here (e.g. PAULI_CHANNEL_1/2, E/ERASE, etc.), extend this function.
     raise NotImplementedError(
         f"Don't know how to extract probability for gate '{gate}' with args={args}. "
-        f"Extend _effective_location_probability for your noise model."
+        f"Extend _effective_location_probability to cover this noise model."
     )
 
 
@@ -254,16 +245,16 @@ def detector_error_budgets_from_explain(
 
     for ee in explained:
         # Which detectors does this DEM error term touch?
-        det_ids: List[int] = []
-        for term in ee.dem_error_terms:
-            dt = term.dem_target
-            if dt.is_relative_detector_id():
-                det_ids.append(int(dt.val))
+        det_ids = [
+            int(term.dem_target.val)
+            for term in ee.dem_error_terms
+            if term.dem_target.is_relative_detector_id()
+        ]
         if not det_ids:
             continue
 
-        # Each CircuitErrorLocation is a separate *place* in the circuit that can realize this DEM term.
-        # We count them all (as you requested).
+        # Each CircuitErrorLocation is a separate *place* in the circuit that
+        # can realize this DEM term; all of them count toward the budget.
         for loc in ee.circuit_error_locations:
             p_loc = _effective_location_probability(loc)
             key = group_key_fn(loc)
@@ -290,27 +281,23 @@ def detector_error_budgets_from_explain(
 
     budgets: List[Dict[str, BudgetItem]] = []
     for d in range(num_det):
-        items: Dict[str, BudgetItem] = {}
-        # Compute total log-weight for shares.
-        total_log_w = 0.0
-        tmp: Dict[str, Tuple[List[float], float]] = {}
-        for k, ps in per_det_group_ps[d].items():
-            log_w = 0.0
-            for p in ps:
-                # log(1-2p) < 0 so -log(...) is a positive "weight"
-                log_w += -math.log(max(1e-300, 1.0 - 2.0 * float(p)))
-            tmp[k] = (ps, log_w)
-            total_log_w += log_w
+        groups = per_det_group_ps[d]
+        # log(1-2p) < 0 so -log(...) is a positive "weight"
+        log_weights = {
+            k: -sum(math.log(max(1e-300, 1.0 - 2.0 * float(p))) for p in ps)
+            for k, ps in groups.items()
+        }
+        total_log_w = sum(log_weights.values())
 
-        for k, (ps, log_w) in tmp.items():
-            p_only = detector_probability_from_independent_toggles(ps)
-            share = (log_w / total_log_w) if total_log_w > 0 else 0.0
+        items: Dict[str, BudgetItem] = {}
+        for k, ps in groups.items():
+            log_w = log_weights[k]
             items[k] = BudgetItem(
                 count=len(ps),
                 sum_p=float(sum(ps)),
-                p_if_only_this_group=float(p_only),
+                p_if_only_this_group=float(detector_probability_from_independent_toggles(ps)),
                 log_weight=float(log_w),
-                share_of_log_weight=float(share),
+                share_of_log_weight=float(log_w / total_log_w) if total_log_w > 0 else 0.0,
                 example_locations=tuple(per_det_group_examples[d].get(k, [])),
             )
         budgets.append(items)

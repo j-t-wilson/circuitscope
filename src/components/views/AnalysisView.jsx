@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useTheme } from '../../contexts/ThemeContext.jsx';
+import { useCircuit } from '../../contexts/CircuitContext.jsx';
 import {
   computeEventFraction,
   computeAverageEventFraction,
@@ -9,16 +10,23 @@ import {
   computeAverageContributions,
 } from '../../utils/eventFraction.js';
 import ParameterInput from './ParameterInput.jsx';
+import SweepChart from './SweepChart.jsx';
+import ExportMenu from '../ExportMenu.jsx';
+import { GLOBAL_SCALE, paramsAtSweep } from '../../utils/sweep.js';
 
 export default function AnalysisView({ data, selectedDetector, setSelectedDetector }) {
   const { C } = useTheme();
+  // Parameter overrides are shared app-wide (sliders here, Try/Apply in the
+  // Compare view, live fractions in the detector panel) and reset on circuit load.
+  const { modifiedValues, setModifiedValues, getCachedFormula, cacheFormula } = useCircuit();
   const [formulaData, setFormulaData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [copyStatus, setCopyStatus] = useState(null);
   const [sortColumn, setSortColumn] = useState('count');
   const [sortDirection, setSortDirection] = useState('desc');
-  const [modifiedValues, setModifiedValues] = useState({});
+  // Which knob the sweep chart plots: a parameter name, GLOBAL_SCALE, or null
+  const [sweepParam, setSweepParam] = useState(null);
 
   useEffect(() => {
     if (!selectedDetector || !data.circuit_text) {
@@ -27,6 +35,18 @@ export default function AnalysisView({ data, selectedDetector, setSelectedDetect
     }
 
     const detectorId = selectedDetector === 'Average' ? -1 : parseInt(selectedDetector.replace('D', ''), 10);
+
+    // Responses are cached per circuit in CircuitContext (same pattern as the
+    // propagation frame cache), so revisiting a detector is instant.
+    const cached = getCachedFormula(data.circuit_text, detectorId);
+    if (cached) {
+      setFormulaData(cached);
+      setError(null);
+      setLoading(false);
+      return;
+    }
+
+    let cancelled = false;
     setLoading(true);
     setError(null);
 
@@ -40,23 +60,25 @@ export default function AnalysisView({ data, selectedDetector, setSelectedDetect
     })
       .then(res => res.json())
       .then(result => {
+        if (cancelled) return;
         if (result.error) {
           setError(result.error);
           setFormulaData(null);
         } else {
+          cacheFormula(data.circuit_text, detectorId, result);
           setFormulaData(result);
         }
       })
       .catch(err => {
+        if (cancelled) return;
         setError(err.message);
         setFormulaData(null);
       })
-      .finally(() => setLoading(false));
-  }, [selectedDetector, data.circuit_text]);
-
-  useEffect(() => {
-    setModifiedValues({});
-  }, [formulaData]);
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [selectedDetector, data.circuit_text, getCachedFormula, cacheFormula]);
 
   const currentParams = useMemo(() => {
     if (!formulaData?.parameters) return [];
@@ -65,6 +87,24 @@ export default function AnalysisView({ data, selectedDetector, setSelectedDetect
       value: modifiedValues[p.name] ?? p.original_value,
     }));
   }, [formulaData, modifiedValues]);
+
+  // Only sweep a knob that exists in the current formula (the parameter set
+  // changes with the selected detector); GLOBAL_SCALE is always valid.
+  const activeSweep =
+    sweepParam === GLOBAL_SCALE || currentParams.some(p => p.name === sweepParam)
+      ? sweepParam
+      : null;
+
+  // Event fraction under arbitrary parameter values, for the current selection
+  // (average over detector_counts when "Average" is selected). Drives both the
+  // live readout below and the sweep chart.
+  const evaluateFraction = useMemo(() => {
+    if (formulaData?.detector_counts && formulaData?.num_detectors) {
+      return (params) =>
+        computeAverageEventFraction(params, formulaData.detector_counts, formulaData.num_detectors);
+    }
+    return (params) => computeEventFraction(params);
+  }, [formulaData]);
 
   const { currentEventFraction, currentSensitivities, currentContributions } = useMemo(() => {
     if (!currentParams.length) return { currentEventFraction: 0, currentSensitivities: [], currentContributions: [] };
@@ -110,6 +150,19 @@ export default function AnalysisView({ data, selectedDetector, setSelectedDetect
     }
   };
 
+  // Click-to-set on the sweep chart: write the shared overrides. A global ×k
+  // click replaces all overrides with a uniform scale of nominal (clamped at
+  // each gate's physical maximum, same as the sliders).
+  const handleSweepSet = (x) => {
+    if (activeSweep === GLOBAL_SCALE) {
+      setModifiedValues(Object.fromEntries(
+        paramsAtSweep(currentParams, GLOBAL_SCALE, x).map(p => [p.name, p.value])
+      ));
+    } else if (activeSweep) {
+      setModifiedValues(prev => ({ ...prev, [activeSweep]: x }));
+    }
+  };
+
   const handleSort = (column) => {
     if (sortColumn === column) {
       setSortDirection(d => d === 'asc' ? 'desc' : 'asc');
@@ -148,6 +201,29 @@ export default function AnalysisView({ data, selectedDetector, setSelectedDetect
   }, [currentParams, sensitivityMap, contributionMap, sortColumn, sortDirection]);
 
   const isAverageSelected = selectedDetector === 'Average';
+
+  // Parameter table as displayed: current (possibly overridden) values plus
+  // the derived sensitivity/contribution columns for the selected detector.
+  const getParameterTable = () => ({
+    columns: [
+      { key: 'name', label: 'name' },
+      { key: 'gate', label: 'gate' },
+      { key: 'value', label: 'value' },
+      { key: 'original_value', label: 'original_value' },
+      { key: 'count', label: 'count' },
+      { key: 'sensitivity', label: 'sensitivity' },
+      { key: 'contribution', label: 'contribution' },
+    ],
+    rows: sortedParams.map(p => ({
+      name: p.name,
+      gate: p.gate_type,
+      value: p.value,
+      original_value: p.original_value,
+      count: p.gate_count ?? p.count,
+      sensitivity: sensitivityMap[p.name] ?? 0,
+      contribution: contributionMap[p.name] ?? 0,
+    })),
+  });
 
   const chipStyle = (active, tone = 'detector') => {
     const color = tone === 'accent' ? C.accent : C.detector;
@@ -226,45 +302,25 @@ export default function AnalysisView({ data, selectedDetector, setSelectedDetect
     );
   };
 
-  if (!selectedDetector) {
-    return (
-      <div>
-        {detectorGrid}
-        {statusPanel(
-          <>
-            <p style={{ margin: '0 0 8px', color: C.text }}>Select a detector to generate its analytical event fraction formula.</p>
-            <p style={{ fontSize: 12, margin: 0 }}>
-              Parameters are grouped by unique error mechanism and original value in the Stim circuit.
-            </p>
-          </>
-        )}
-      </div>
-    );
-  }
+  const status =
+    !selectedDetector ? statusPanel(
+      <>
+        <p style={{ margin: '0 0 8px', color: C.text }}>Select a detector to generate its analytical event fraction formula.</p>
+        <p style={{ fontSize: 12, margin: 0 }}>
+          Parameters are grouped by unique error mechanism and original value in the Stim circuit.
+        </p>
+      </>
+    )
+    : loading ? statusPanel('Generating formula...')
+    : error ? statusPanel(<span>Error: {error}</span>, 'error')
+    : !formulaData ? statusPanel('No formula data available.')
+    : null;
 
-  if (loading) {
+  if (status) {
     return (
       <div>
         {detectorGrid}
-        {statusPanel('Generating formula...')}
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div>
-        {detectorGrid}
-        {statusPanel(<span>Error: {error}</span>, 'error')}
-      </div>
-    );
-  }
-
-  if (!formulaData) {
-    return (
-      <div>
-        {detectorGrid}
-        {statusPanel('No formula data available.')}
+        {status}
       </div>
     );
   }
@@ -350,15 +406,82 @@ export default function AnalysisView({ data, selectedDetector, setSelectedDetect
         </div>
       </div>
 
+      {activeSweep && (
+        <div style={{
+          marginBottom: 16,
+          padding: 14,
+          background: `linear-gradient(180deg, ${C.glassStrong}, ${C.field})`,
+          border: `1px solid ${C.line}`,
+          borderRadius: 8,
+        }}>
+          {sectionTitle('Parameter sweep', (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{ color: C.accent, fontSize: 11, fontFamily: 'var(--mono)', fontWeight: 700, overflowWrap: 'anywhere' }}>
+                {activeSweep === GLOBAL_SCALE ? 'Global scale ×k (all noise)' : activeSweep}
+              </span>
+              <button
+                onClick={() => setSweepParam(null)}
+                title="Close sweep"
+                style={{
+                  width: 24,
+                  height: 24,
+                  padding: 0,
+                  background: C.field,
+                  color: C.textDim,
+                  border: `1px solid ${C.line}`,
+                  borderRadius: 6,
+                  cursor: 'pointer',
+                  fontSize: 11,
+                  fontWeight: 700,
+                  flexShrink: 0,
+                }}
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+          <SweepChart
+            params={currentParams}
+            sweptName={activeSweep}
+            evaluate={evaluateFraction}
+            onSetValue={handleSweepSet}
+          />
+        </div>
+      )}
+
       {formulaData.parameters.length > 0 && (
         <div style={{ marginBottom: 16 }}>
           {sectionTitle('Parameters', (
-            <span style={{ color: C.textDim, fontSize: 11, fontFamily: 'var(--mono)' }}>{formulaData.parameters.length}</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <button
+                onClick={() => setSweepParam(s => (s === GLOBAL_SCALE ? null : GLOBAL_SCALE))}
+                title="Sweep all noise rates together: plot the event fraction vs a global multiplier k"
+                style={{
+                  padding: '4px 10px',
+                  background: activeSweep === GLOBAL_SCALE ? C.accent : C.field,
+                  color: activeSweep === GLOBAL_SCALE ? C.bg : C.accent,
+                  border: `1px solid ${C.accent}`,
+                  borderRadius: 6,
+                  cursor: 'pointer',
+                  fontSize: 11,
+                  fontWeight: 700,
+                }}
+              >
+                Sweep ×k
+              </button>
+              <ExportMenu
+                baseName={`circuitscope-parameters-${isAverageSelected ? 'average' : selectedDetector}`}
+                getTable={getParameterTable}
+                title="Export the parameter table (values, sensitivities, contributions) as CSV or JSON"
+              />
+              <span style={{ color: C.textDim, fontSize: 11, fontFamily: 'var(--mono)' }}>{formulaData.parameters.length}</span>
+            </div>
           ))}
           <div className="soft-scroll" style={{ background: C.field, border: `1px solid ${C.line}`, borderRadius: 8, overflow: 'auto' }}>
             <table style={{ width: '100%', minWidth: 760, borderCollapse: 'collapse', fontSize: 12 }}>
               <thead>
                 <tr>
+                  <th style={{ ...thStyle, width: 34 }} aria-label="Sweep" />
                   <th style={thStyle}>Name</th>
                   <th style={thStyle}>Gate</th>
                   <th
@@ -392,6 +515,26 @@ export default function AnalysisView({ data, selectedDetector, setSelectedDetect
               <tbody>
                 {sortedParams.map((p) => (
                   <tr key={p.name} style={{ borderTop: `1px solid ${C.line}` }}>
+                    <td style={{ padding: '6px 4px 6px 10px' }}>
+                      <button
+                        onClick={() => setSweepParam(s => (s === p.name ? null : p.name))}
+                        title="Sweep this parameter: plot the event fraction as it varies over a log range"
+                        style={{
+                          width: 24,
+                          height: 24,
+                          padding: 0,
+                          background: activeSweep === p.name ? C.accent : C.field,
+                          color: activeSweep === p.name ? C.bg : C.textDim,
+                          border: `1px solid ${activeSweep === p.name ? C.accent : C.line}`,
+                          borderRadius: 6,
+                          cursor: 'pointer',
+                          fontSize: 13,
+                          lineHeight: 1,
+                        }}
+                      >
+                        ∿
+                      </button>
+                    </td>
                     <td style={{ padding: '9px 11px', fontFamily: 'var(--mono)', color: C.accent }}>{p.name}</td>
                     <td style={{ padding: '9px 11px', color: C.error, fontFamily: 'var(--mono)' }}>{p.gate_type}</td>
                     <td style={{ padding: '9px 11px' }}>

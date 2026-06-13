@@ -1,31 +1,44 @@
+import { useState } from 'react';
 import { useTheme } from '../contexts/ThemeContext.jsx';
+import { viewAccent } from '../constants/theme.js';
+import { buildShareUrl } from '../utils/shareState.js';
+import { copyText } from '../utils/clipboard.js';
 import Logo from './Logo.jsx';
 
 const VIEW_LABELS = {
   timeline: 'Timeline',
   analysis: 'Analysis',
+  compare: 'Compare',
   code: 'Code',
   dem: 'DEM',
 };
 
-export default function Header({ viewMode, setViewMode, onLoadClick, onLogoClick }) {
+export default function Header({ viewMode, setViewMode, onLogoClick, onImportClick, onNoiseClick, hasMeasuredData, circuitText, selectedDetector }) {
   const { C, isDark, toggleTheme } = useTheme();
+  const [linkStatus, setLinkStatus] = useState(null);
 
-  const controlButton = (active = false) => ({
+  const handleCopyLink = async () => {
+    const url = buildShareUrl(circuitText, selectedDetector);
+    const status = !url ? 'toolong' : (await copyText(url)) ? 'copied' : 'error';
+    setLinkStatus(status);
+    setTimeout(() => setLinkStatus(null), 2000);
+  };
+
+  // The active view tab tints to its view's accent (see viewAccent), so the
+  // tab you click and the title bar you land on agree.
+  const controlButton = (active = false, accent = null) => ({
     minHeight: 34,
     padding: '7px 12px',
-    background: active
-      ? `linear-gradient(180deg, ${C.detectorBright}, ${C.detector})`
-      : C.glass,
+    background: active ? accent.gradient : C.glass,
     color: active ? C.bg : C.text,
-    border: `1px solid ${active ? C.detectorBright : C.line}`,
+    border: `1px solid ${active ? accent.main : C.line}`,
     borderRadius: 8,
     cursor: 'pointer',
     fontSize: 12,
     fontWeight: active ? 700 : 600,
     fontFamily: 'var(--display)',
     transition: 'background 140ms ease, border-color 140ms ease, color 140ms ease, transform 140ms ease',
-    boxShadow: active ? `0 0 0 1px ${C.amberSoft}, 0 10px 28px ${C.amberSoft}` : 'none',
+    boxShadow: active ? `0 0 0 1px ${accent.soft}, 0 10px 28px ${accent.soft}` : 'none',
   });
 
   return (
@@ -45,7 +58,7 @@ export default function Header({ viewMode, setViewMode, onLoadClick, onLogoClick
       <button
         className="brand-button"
         onClick={onLogoClick}
-        title="Return to start"
+        title="Load a different circuit"
         style={{
           display: 'flex',
           alignItems: 'center',
@@ -91,7 +104,7 @@ export default function Header({ viewMode, setViewMode, onLoadClick, onLogoClick
                 key={mode}
                 className="view-button"
                 onClick={() => setViewMode(mode)}
-                style={controlButton(active)}
+                style={controlButton(active, viewAccent(C, mode))}
               >
                 {label}
               </button>
@@ -116,18 +129,51 @@ export default function Header({ viewMode, setViewMode, onLoadClick, onLogoClick
         </button>
 
         <button
-          className="edit-circuit-button"
-          onClick={onLoadClick}
+          className="add-noise-button"
+          onClick={onNoiseClick}
+          title="Insert composable noise sources into the circuit (or strip existing noise)"
           style={{
             ...controlButton(false),
             whiteSpace: 'nowrap',
-            background: `linear-gradient(180deg, ${C.accent}, color-mix(in srgb, ${C.accent} 72%, ${C.bg}))`,
-            color: C.bg,
-            border: `1px solid ${C.accent}`,
-            fontWeight: 750,
           }}
         >
-          Edit circuit
+          Noise
+        </button>
+
+        <button
+          className="import-data-button"
+          onClick={onImportClick}
+          title={hasMeasuredData ? 'Measured data loaded — click to replace or remove' : 'Import measured detector fractions to compare against the model'}
+          style={{
+            ...controlButton(false),
+            whiteSpace: 'nowrap',
+            color: hasMeasuredData ? C.bg : C.text,
+            background: hasMeasuredData
+              ? `linear-gradient(180deg, ${C.measure}, color-mix(in srgb, ${C.measure} 72%, ${C.bg}))`
+              : C.glass,
+            border: `1px solid ${hasMeasuredData ? C.measure : C.line}`,
+            fontWeight: hasMeasuredData ? 750 : 600,
+          }}
+        >
+          {hasMeasuredData ? 'Data ✓' : 'Import data'}
+        </button>
+
+        <button
+          className="copy-link-button"
+          onClick={handleCopyLink}
+          title="Copy a shareable link to this circuit (the URL encodes the circuit and selected detector)"
+          style={{
+            ...controlButton(false),
+            whiteSpace: 'nowrap',
+            background: linkStatus === 'copied' ? C.success : C.glass,
+            color: linkStatus === 'copied' ? C.bg : C.text,
+            border: `1px solid ${linkStatus === 'copied' ? C.success : C.line}`,
+          }}
+        >
+          {linkStatus === 'copied' ? 'Copied ✓'
+            : linkStatus === 'toolong' ? 'Circuit too large'
+            : linkStatus === 'error' ? 'Copy failed'
+            : 'Copy link'}
         </button>
       </div>
     </header>
