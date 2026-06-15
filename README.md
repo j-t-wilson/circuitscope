@@ -10,7 +10,7 @@ explanation APIs for the underlying circuit analysis, and outputs
 an interactive circuit diagram, error budget, and analytical expressions for detector probabilities.
 
 ![Circuit timeline with a detector selected: the highlighted gates, error
-locations, and error budget for that detector](docs/images/timeline.png)
+locations, and error budget for that detector](https://raw.githubusercontent.com/j-t-wilson/circuitscope/main/docs/images/timeline.png)
 
 ## Installation
 
@@ -81,7 +81,7 @@ least-squares fit of the noise parameters (here recovering a deliberately
 tripled measurement-flip rate):
 
 ![Compare view: residual chart, most likely scenarios, and the full
-least-squares fit](docs/images/compare.png)
+least-squares fit](https://raw.githubusercontent.com/j-t-wilson/circuitscope/main/docs/images/compare.png)
 
 ### Analytical response
 
@@ -89,7 +89,7 @@ The Analysis view generates a standalone Python function for any detector's
 event fraction, with interactive sliders and per-parameter sensitivities:
 
 ![Analysis view: parameter sliders, sensitivities, and the generated Python
-expression](docs/images/analysis.png)
+expression](https://raw.githubusercontent.com/j-t-wilson/circuitscope/main/docs/images/analysis.png)
 
 The screenshots above are generated against the live app by
 `node scripts/readme-screenshots.mjs` (see the header of that script).
