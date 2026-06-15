@@ -537,7 +537,13 @@ export function CircuitProvider({ children }) {
         if (l.name !== hoveredMechanism.name) return;
         if (hoveredMechanism.qubits && !hoveredMechanism.qubits.every(q => l.qubits.includes(q))) return;
       }
-      l.qubits.forEach(q => s.add(`${l.tick}-${q}-${l.name}-${l.rate}`));
+      // Key on the exact instruction so the two same-rate flips bracketing a
+      // composite MR (before-measure and after-reset on the same qubits/tick)
+      // aren't conflated. Fall back to the coarse (tick, qubit, name, rate) key
+      // only when the instruction index is unavailable.
+      const idx = l.instruction_index;
+      const precise = idx != null && idx >= 0;
+      l.qubits.forEach(q => s.add(precise ? `i${idx}-${q}` : `${l.tick}-${q}-${l.name}-${l.rate}`));
     }));
     return s;
   }, [relevantErrors, hoveredMechanism]);

@@ -248,7 +248,11 @@ export default function Timeline({
     return m;
   }, [data.timeline, tickSubColumnInfo]);
 
-  const isHi = (ti, q, n, rate) => highlighted.has(`${ti}-${q}-${n}-${rate}`);
+  const isHi = (ti, q, op) => {
+    const idx = op.instruction_index;
+    if (idx != null && idx >= 0 && highlighted.has(`i${idx}-${q}`)) return true;
+    return highlighted.has(`${ti}-${q}-${op.name}-${op.rate}`);
+  };
 
   // Error propagation overlay: measurement keys flipped by the propagated
   // Pauli, and the set of detectors it flips (rings on their markers).
@@ -505,7 +509,7 @@ export default function Timeline({
                     const y = 60 * zoom + qi * H + H / 2;
 
                     return ops.map((op, oi) => {
-                      const hi = isHi(ti, qi, op.name, op.rate);
+                      const hi = isHi(ti, qi, op);
                       const f = hi ? 'url(#glow)' : undefined;
                       const stroke = hi ? C.error : C.gate;
 

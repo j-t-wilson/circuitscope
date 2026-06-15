@@ -346,7 +346,6 @@ class CircuitScopeAnalyzer:
         - probability: The actual DEM probability for this error mechanism
         """
         errors = []
-        instruction_index_map = self._build_instruction_index_map()
 
         # Build a map from (sorted targets tuple) -> probability from the DEM
         dem_probability_map = {}
@@ -366,10 +365,13 @@ class CircuitScopeAnalyzer:
                 inst_str = str(loc.instruction_targets)
                 inst_name, error_rate, qubits = self._instruction_details_from_location(loc)
 
-                # Try to find instruction index
-                inst_idx = instruction_index_map.get(
-                    (loc.tick_offset, inst_name, tuple(qubits)), -1
-                )
+                # Exact instruction offset in the flattened circuit, from stim's
+                # stack frame. This matches get_timeline()'s instruction_index and
+                # uniquely identifies the instruction even when two same-rate
+                # channels share a tick (e.g. the before-measure and after-reset
+                # flips that bracket a composite MR), which a
+                # (tick, name, qubits) key cannot tell apart.
+                inst_idx = loc.stack_frames[-1].instruction_offset if loc.stack_frames else -1
 
                 locations.append({
                     'pauli': pauli_str,
@@ -392,23 +394,6 @@ class CircuitScopeAnalyzer:
             })
 
         return errors
-
-    def _build_instruction_index_map(self) -> Dict[Tuple, int]:
-        """Build a map from (tick, name, qubits) to instruction index."""
-        index_map = {}
-        tick = 0
-
-        for idx, inst in enumerate(self.circuit):
-            name = inst.name
-
-            if name == 'TICK':
-                tick += 1
-                continue
-
-            qubits = self._extract_qubits(inst)
-            index_map[(tick, name, tuple(qubits))] = idx
-
-        return index_map
 
     def get_timeline(self) -> List[Dict[str, Any]]:
         """
