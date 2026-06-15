@@ -14,15 +14,21 @@ locations, and error budget for that detector](docs/images/timeline.png)
 
 ## Installation
 
-CircuitScope requires Python 3.10+. Install from the repository:
+CircuitScope requires Python 3.10+. Install from PyPI:
+
+```bash
+pip install circuitscope
+```
+
+This installs the `circuitscope` command and its dependencies (stim, flask).
+
+To install the latest development version from source instead:
 
 ```bash
 git clone https://github.com/j-t-wilson/circuitscope
 cd circuitscope
 pip install .
 ```
-
-This installs the `circuitscope` command and dependencies (stim, flask).
 
 ## Run
 
